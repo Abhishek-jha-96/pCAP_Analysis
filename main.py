@@ -178,8 +178,7 @@ if __name__ == "__main__":
                 else:
                     console.print(str(content))
         except FileNotFoundError:
-            # console.print(f"[red]Error: File '{file}' not found.[/red]")
-            console.print(traceback.format_exc())
+            console.print(f"[red]Error: File '{file}' not found.[/red]")
         except Exception as e:
             console.print(f"[red]Error while processing data file.[/red]")
 
