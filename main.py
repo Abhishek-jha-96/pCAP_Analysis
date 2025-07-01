@@ -1,10 +1,10 @@
 import re
+import traceback
 from collections import Counter
 from typing import Optional
 from scapy.all import rdpcap
 from analysis import (
     detect_cleartext_credentials,
-    detect_common_ports_with_metadata, 
     detect_ddos, 
     detect_excessive_icmp, 
     detect_excessive_syn, 
@@ -14,16 +14,17 @@ from analysis import (
     detect_port_scanning, 
     detect_threat_hunting, 
     detect_unsolicited_arp,
+    detect_unusual_ports,
     flag_suspicious_ips,
     generate_timeline,
     detect_suspicious_domains,
     detect_malicious_dns_queries,
-    detect_outbound_odd_ports,
     detect_large_post_requests,
     detect_tls_anomalies,
     detect_non_standard_protocols
 )
 from helpers import file_hash
+from report_gen import export_soc_threat_report
 
 def filter_protocols(packets):
     groups = {"TCP": [], "UDP": [], "HTTP": [], "HTTPS": [], "DNS": []}
@@ -110,7 +111,7 @@ def analyze_pcap(file_path):
     print(f"[*] File Hash: {file_hash(file_path)}")
 
     anomalies = {
-        "Uncommon Destination Ports (TCP/UDP)": detect_common_ports_with_metadata(protocols["TCP"] + protocols["UDP"]),
+        "Uncommon Destination Ports (TCP/UDP)": detect_unusual_ports(protocols["TCP"] + protocols["UDP"], mode="any"),
         "Possible DDoS Attacks (IP)": detect_ddos(packets),
         "Large Packets (All)": detect_large_packets(packets),
         "Unsolicited ARP Replies": detect_unsolicited_arp(packets),
@@ -122,13 +123,12 @@ def analyze_pcap(file_path):
         "Threat Hunting Indicators": detect_threat_hunting(packets),
         "Suspicious Domain Requests": detect_suspicious_domains(protocols["HTTP"]),
         "Malicious DNS Queries": detect_malicious_dns_queries(protocols["DNS"]),
-        "Outbound Connections to Odd Ports": detect_outbound_odd_ports(packets),
+        "Outbound Connections to Odd Ports": detect_unusual_ports(packets, mode="outbound"),
         "Large POST Requests": detect_large_post_requests(protocols["HTTP"]),
         "TLS Client Hello Anomalies": detect_tls_anomalies(protocols["HTTPS"]),
         "Non-Standard Protocols on Unusual Ports": detect_non_standard_protocols(protocols["TCP"]),
         "Credential/Token Leakage": detect_cleartext_credentials(protocols["HTTP"]),
         "IP Reputation / Abuse Indicators": flag_suspicious_ips(packets, reputation_db=None),
-        "Timeline of Activity": generate_timeline(packets, window=5)
     }
 
     anomaly_indices = extract_anomalous_packets(anomalies)
@@ -136,7 +136,6 @@ def analyze_pcap(file_path):
 
     # Generate timelines based on suspicious packets only
     anomalies["Timeline of Detected Anomalies"] = generate_timeline(suspicious_packets, window=5)
-
     report = generate_final_report(packets, protocols, anomalies, anomaly_indices)
 
     return report
@@ -147,24 +146,6 @@ def format_output(data, max_items=10):
     if isinstance(data, list) and len(data) > max_items:
         return data[:max_items] + [f"... ({len(data) - max_items} more items truncated)"]
     return data
-
-def export_report_to_markdown(report: dict, output_path: str):
-    lines = [f"# PCAP Threat Analysis Report\n"]
-    for section, content in report.items():
-        lines.append(f"\n## {section}\n")
-        if isinstance(content, dict):
-            for k, v in content.items():
-                if isinstance(v, list):
-                    lines.append(f"- **{k}**:\n" + "\n".join(f"  - {item}" for item in v))
-                else:
-                    lines.append(f"- **{k}**: {v}")
-        elif isinstance(content, list):
-            lines += [f"- {item}" for item in content]
-        else:
-            lines.append(str(content))
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write("\n".join(lines))
-    print(f"[✓] Markdown report saved to: {output_path}")
 
 if __name__ == "__main__":
     import typer
@@ -177,7 +158,7 @@ if __name__ == "__main__":
         try:
             report = analyze_pcap(file)
             if md:
-                export_report_to_markdown(report, md)
+                export_soc_threat_report(report, output_path=md, file_name=file, analyst="Name")
 
             for section, content in report.items():
                 console.rule(f"[bold red]{section}")
@@ -197,8 +178,9 @@ if __name__ == "__main__":
                 else:
                     console.print(str(content))
         except FileNotFoundError:
-            console.print(f"[red]Error: File '{file}' not found.[/red]")
+            # console.print(f"[red]Error: File '{file}' not found.[/red]")
+            console.print(traceback.format_exc())
         except Exception as e:
-            console.print(f"[red]Error analyzing file: {str(e)}[/red]")
+            console.print(f"[red]Error while processing data file.[/red]")
 
     typer.run(analyze)

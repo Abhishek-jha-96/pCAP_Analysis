@@ -3,46 +3,6 @@ from collections import defaultdict, Counter
 from scapy.all import IP, TCP, UDP, ICMP, ARP, DNS, DNSQR
 import datetime
 import re
-from urllib.parse import urlparse
-
-# Function to detect common destination ports for TCP and UDP
-
-
-def detect_common_ports_with_metadata(packets):
-    common_tcp_ports = {80, 443, 21, 22, 25, 110, 143, 3389}
-    common_udp_ports = {53, 67, 68, 123, 161, 162}
-
-    port_stats = defaultdict(lambda: {
-        "count": 0,
-        "protocol": "",
-        "examples": []  # Example metadata for deep dive
-    })
-
-    for idx, pkt in enumerate(packets):
-        if pkt.haslayer(TCP):
-            dport = pkt[TCP].dport
-            if dport not in common_tcp_ports:
-                port_stats[dport]["count"] += 1
-                port_stats[dport]["protocol"] = "TCP"
-                if len(port_stats[dport]["examples"]) < 3:
-                    port_stats[dport]["examples"].append({
-                        "index": idx,
-                        "src": pkt[IP].src if pkt.haslayer(IP) else "N/A",
-                        "dst": pkt[IP].dst if pkt.haslayer(IP) else "N/A"
-                    })
-        elif pkt.haslayer(UDP):
-            dport = pkt[UDP].dport
-            if dport not in common_udp_ports:
-                port_stats[dport]["count"] += 1
-                port_stats[dport]["protocol"] = "UDP"
-                if len(port_stats[dport]["examples"]) < 3:
-                    port_stats[dport]["examples"].append({
-                        "index": idx,
-                        "src": pkt[IP].src if pkt.haslayer(IP) else "N/A",
-                        "dst": pkt[IP].dst if pkt.haslayer(IP) else "N/A"
-                    })
-
-    return dict(sorted(port_stats.items(), key=lambda item: item[1]["count"], reverse=True))
 
 
 # Function to detect excessive traffic (DDoS) based on packet rate
@@ -353,55 +313,6 @@ def detect_malicious_dns_queries(packets):
     }
 
 
-def detect_outbound_odd_ports(packets):
-    """Detect outbound connections to unusual ports"""
-    common_outbound_ports = {80, 443, 53, 25,
-                             110, 143, 993, 995, 587, 465, 21, 22, 23}
-    suspicious_outbound = []
-    port_stats = defaultdict(int)
-
-    for idx, pkt in enumerate(packets):
-        if pkt.haslayer(IP) and (pkt.haslayer(TCP) or pkt.haslayer(UDP)):
-            # Assume outbound if source is private IP and dest is public
-            src_ip = pkt[IP].src
-            dst_ip = pkt[IP].dst
-
-            # Check if source is private IP (simplified check)
-            is_private_src = (src_ip.startswith('192.168.') or
-                              src_ip.startswith('10.') or
-                              src_ip.startswith('172.'))
-
-            is_private_dst = (dst_ip.startswith('192.168.') or
-                              dst_ip.startswith('10.') or
-                              dst_ip.startswith('172.'))
-
-            if is_private_src and not is_private_dst:  # Likely outbound
-                if pkt.haslayer(TCP):
-                    dport = pkt[TCP].dport
-                    protocol = "TCP"
-                elif pkt.haslayer(UDP):
-                    dport = pkt[UDP].dport
-                    protocol = "UDP"
-                else:
-                    continue
-
-                port_stats[dport] += 1
-
-                if dport not in common_outbound_ports:
-                    suspicious_outbound.append({
-                        "src_ip": src_ip,
-                        "dst_ip": dst_ip,
-                        "dst_port": dport,
-                        "protocol": protocol,
-                        "packet_index": idx
-                    })
-
-    return {
-        "suspicious_outbound": suspicious_outbound[:50],  # Limit output
-        "port_frequency": dict(sorted(port_stats.items(), key=lambda x: x[1], reverse=True))
-    }
-
-
 def detect_large_post_requests(packets):
     """Detect unusually large HTTP POST requests"""
     large_posts = []
@@ -605,4 +516,61 @@ def flag_suspicious_ips(packets, reputation_db=None):
     return {
         "flagged_ips": list(suspicious_ips.keys()),
         "ip_roles": {ip: list(roles) for ip, roles in suspicious_ips.items()}
+    }
+
+def detect_unusual_ports(packets, mode="any", max_examples=3, include_port_stats=True):
+    common_tcp_ports = {80, 443, 21, 22, 25, 110, 143, 3389}
+    common_udp_ports = {53, 67, 68, 123, 161, 162}
+    common_outbound_ports = common_tcp_ports | {993, 995, 587, 465, 53, 23}
+
+    unusual_ports = []
+    port_stats = defaultdict(lambda: {"count": 0, "protocol": "", "examples": []})
+
+    for idx, pkt in enumerate(packets):
+        if not pkt.haslayer(IP) or not (pkt.haslayer(TCP) or pkt.haslayer(UDP)):
+            continue
+
+        src_ip = pkt[IP].src
+        dst_ip = pkt[IP].dst
+
+        is_private_src = src_ip.startswith(("192.168.", "10.", "172."))
+        is_private_dst = dst_ip.startswith(("192.168.", "10.", "172."))
+
+        if mode == "outbound" and not (is_private_src and not is_private_dst):
+            continue
+
+        if pkt.haslayer(TCP):
+            dport = pkt[TCP].dport
+            proto = "TCP"
+            is_common = dport in common_tcp_ports if mode != "outbound" else dport in common_outbound_ports
+        elif pkt.haslayer(UDP):
+            dport = pkt[UDP].dport
+            proto = "UDP"
+            is_common = dport in common_udp_ports if mode != "outbound" else dport in common_outbound_ports
+        else:
+            continue
+
+        if not is_common:
+            unusual_ports.append({
+                "packet_index": idx,
+                "src_ip": src_ip,
+                "dst_ip": dst_ip,
+                "dst_port": dport,
+                "protocol": proto
+            })
+
+        # Always collect port stats
+        stat = port_stats[dport]
+        stat["count"] += 1
+        stat["protocol"] = proto
+        if len(stat["examples"]) < max_examples:
+            stat["examples"].append({
+                "index": idx,
+                "src": src_ip,
+                "dst": dst_ip
+            })
+
+    return {
+        "unusual_ports": unusual_ports[:50],
+        "port_statistics": dict(sorted(port_stats.items(), key=lambda x: x[1]["count"], reverse=True)) if include_port_stats else {}
     }
