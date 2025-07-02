@@ -26,6 +26,15 @@ pip install -r requirements.txt
 ```
 Place the data `.pcap` file at root level of the directory.
 
+## Config file
+create a file `config.ini`:
+```bash
+[DEFAULT]
+API_KEY = AbuseIPDB_API_KEY
+confidenceScore = 50 # Change this score.
+maxAgeInDays = 30
+```
+
 Command to Run the script:
 
 ```bash
