@@ -44,20 +44,28 @@ def export_soc_threat_report(report: dict, output_path: str, file_name: str = "U
         format_table(["Host", "Count"], report.get("Top 10 HTTP Hosts", [])),
         "### DNS Queries",
         format_table(["Domain", "Count"], report.get("Top 10 DNS Queries", [])),
-        "\n## Suspicious IPs (Flagged by Reputation Services)"
+        "\n## Suspicious IPs (Flagged by AbuseIPDB)"
     ]
 
     flagged_ips = report.get("Suspicious IPs", [])
+
     if flagged_ips:
-        if isinstance(flagged_ips[0], dict):
-            rows = [(ip.get("ip", "?"), ip.get("reason", "Unknown"), ip.get("abuse_score", "?")) for ip in flagged_ips]
-            lines.append(format_table(["IP", "Reason", "Abuse Score"], rows))
-        else:
-            # Assume it's a list of raw IP strings
-            rows = [(ip,) for ip in flagged_ips]
-            lines.append(format_table(["IP"], rows))
+        # Extract enriched info from AbuseIPDB response
+        rows = []
+        for entry in flagged_ips:
+            ip = entry.get("ip", "N/A")
+            score = entry.get("score", "N/A")
+            reports = entry.get("reports", "N/A")
+            country = entry.get("country", "N/A")
+            domain = entry.get("domain", "N/A")
+            rows.append((ip, score, country, reports, domain))
+
+        lines.append(format_table(
+            ["IP", "Score", "Country", "Reports", "Domain"],
+            rows
+        ))
     else:
-        lines.append("- None found")
+        lines.append("- No suspicious IPs detected via AbuseIPDB")
 
     lines.append("\n## Timeline of Detected Anomalies")
     timeline = report.get("Timeline of Threat Activity", [])

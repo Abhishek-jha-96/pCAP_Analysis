@@ -25,6 +25,12 @@ from analysis import (
 )
 from helpers import file_hash
 from report_gen import export_soc_threat_report
+import typer
+from rich.console import Console
+from rich.table import Table
+
+console = Console()
+
 
 def filter_protocols(packets):
     groups = {"TCP": [], "UDP": [], "HTTP": [], "HTTPS": [], "DNS": []}
@@ -98,7 +104,7 @@ def generate_final_report(packets, protocols, anomalies, anomaly_indices):
         },
         "Top 10 HTTP Hosts": extract_top_http_hosts(protocols["HTTP"]),
         "Top 10 DNS Queries": extract_top_dns_queries(protocols["DNS"]),
-        "Suspicious IPs": anomalies.get("IP Reputation / Abuse Indicators", {}).get("flagged_ips", []),
+        "Suspicious IPs": anomalies.get("IP Reputation / Abuse Indicators", {}).get("flagged_ips"),
         "Credential or Token Leaks": anomalies.get("Credential/Token Leakage", {}).get("leak_indicators", [])[:5],
         "Timeline of Threat Activity": anomalies.get("Timeline of Detected Anomalies", [])
     }
@@ -111,24 +117,40 @@ def analyze_pcap(file_path):
     print(f"[*] File Hash: {file_hash(file_path)}")
 
     anomalies = {
-        "Uncommon Destination Ports (TCP/UDP)": detect_unusual_ports(protocols["TCP"] + protocols["UDP"], mode="any"),
-        "Possible DDoS Attacks (IP)": detect_ddos(packets),
+        # PACKET-LEVEL ANOMALIES
         "Large Packets (All)": detect_large_packets(packets),
-        "Unsolicited ARP Replies": detect_unsolicited_arp(packets),
-        "Large DNS Responses": detect_large_dns_responses(protocols["DNS"]),
         "Excessive ICMP Echo Requests": detect_excessive_icmp(packets),
         "Excessive TCP SYN": detect_excessive_syn(protocols["TCP"]),
+        "Unsolicited ARP Replies": detect_unsolicited_arp(packets),
+
+        # BEHAVIORAL & NETWORK SCANS
         "Port Scanning Attempts": detect_port_scanning(protocols["TCP"] + protocols["UDP"]),
+        "Possible DDoS Attacks (IP)": detect_ddos(packets),
         "Intrusion Detection": detect_intrusion(packets),
-        "Threat Hunting Indicators": detect_threat_hunting(packets),
-        "Suspicious Domain Requests": detect_suspicious_domains(protocols["HTTP"]),
-        "Malicious DNS Queries": detect_malicious_dns_queries(protocols["DNS"]),
-        "Outbound Connections to Odd Ports": detect_unusual_ports(packets, mode="outbound"),
-        "Large POST Requests": detect_large_post_requests(protocols["HTTP"]),
-        "TLS Client Hello Anomalies": detect_tls_anomalies(protocols["HTTPS"]),
+
+        # PROTOCOL MISUSE & SUSPICIOUS COMMUNICATION
         "Non-Standard Protocols on Unusual Ports": detect_non_standard_protocols(protocols["TCP"]),
+        "Outbound Connections to Odd Ports": detect_unusual_ports(packets, mode="outbound"),
+        "TLS Client Hello Anomalies": detect_tls_anomalies(protocols["HTTPS"]),
+        "Large DNS Responses": detect_large_dns_responses(protocols["DNS"]),
+        "Uncommon Destination Ports (TCP/UDP)": detect_unusual_ports(protocols["TCP"] + protocols["UDP"], mode="any"),
+
+        # THREAT HUNTING INDICATORS
+        "Threat Hunting Indicators": detect_threat_hunting(packets),
+
+        # DOMAIN & DNS-BASED THREATS
+        "Malicious DNS Queries": detect_malicious_dns_queries(protocols["DNS"]),
+        "Suspicious Domain Requests": detect_suspicious_domains(protocols["HTTP"]),
+
+        # DATA EXFILTRATION & CREDENTIAL LEAKAGE
+        "Large POST Requests": detect_large_post_requests(protocols["HTTP"]),
         "Credential/Token Leakage": detect_cleartext_credentials(protocols["HTTP"]),
-        "IP Reputation / Abuse Indicators": flag_suspicious_ips(packets, reputation_db=None),
+
+        # REPUTATION & CONTEXTUAL INDICATORS
+        "IP Reputation / Abuse Indicators": flag_suspicious_ips(packets),
+        
+        # TIMELINE ANALYSIS
+        "Timeline of Activity": generate_timeline(packets, window=5)
     }
 
     anomaly_indices = extract_anomalous_packets(anomalies)
@@ -137,7 +159,6 @@ def analyze_pcap(file_path):
     # Generate timelines based on suspicious packets only
     anomalies["Timeline of Detected Anomalies"] = generate_timeline(suspicious_packets, window=5)
     report = generate_final_report(packets, protocols, anomalies, anomaly_indices)
-
     return report
 
 def format_output(data, max_items=10):
@@ -148,11 +169,6 @@ def format_output(data, max_items=10):
     return data
 
 if __name__ == "__main__":
-    import typer
-    from rich.console import Console
-    from rich.table import Table
-
-    console = Console()
 
     def analyze(file: str, verbose: bool = False, md: Optional[str] = None):
         try:
@@ -181,5 +197,6 @@ if __name__ == "__main__":
             console.print(f"[red]Error: File '{file}' not found.[/red]")
         except Exception as e:
             console.print(f"[red]Error while processing data file.[/red]")
+            console.print(traceback.format_exc())
 
     typer.run(analyze)

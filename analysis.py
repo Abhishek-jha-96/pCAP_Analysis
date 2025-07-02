@@ -3,6 +3,7 @@ from collections import defaultdict, Counter
 from scapy.all import IP, TCP, UDP, ICMP, ARP, DNS, DNSQR
 import datetime
 import re
+import requests
 
 
 # Function to detect excessive traffic (DDoS) based on packet rate
@@ -294,7 +295,7 @@ def detect_malicious_dns_queries(packets):
                         })
                         break
 
-                # Check for domain age indicators (very short domains often suspicious)
+                # Check for domain age indicators
                 if len(query_name) < 5 and '.' in query_name:
                     suspicious_dns.append({
                         "query": query_name,
@@ -323,7 +324,6 @@ def detect_large_post_requests(packets):
             try:
                 payload = pkt[Raw].load.decode('utf-8', errors='ignore')
 
-                # Look for POST requests
                 if payload.startswith('POST'):
                     content_length_match = re.search(
                         r'Content-Length:\s*(\d+)', payload, re.IGNORECASE)
@@ -370,24 +370,18 @@ def detect_large_post_requests(packets):
 def detect_tls_anomalies(packets):
     """Detect TLS Client Hello fingerprint anomalies"""
     tls_handshakes = []
-    cipher_suites = defaultdict(int)
 
     for idx, pkt in enumerate(packets):
         if pkt.haslayer(TCP) and pkt.haslayer(Raw) and pkt[TCP].dport == 443:
             try:
                 payload = pkt[Raw].load
 
-                # Look for TLS Client Hello (simplified detection)
-                # TLS record type 22 (handshake), version, length, handshake type 1 (client hello)
                 if len(payload) > 5 and payload[0] == 0x16:  # TLS Handshake
                     tls_version = (payload[1] << 8) | payload[2]
 
-                    if len(payload) > 43:  # Minimum for basic client hello
-                        # Extract SNI if present (simplified)
+                    if len(payload) > 43:
                         sni = "Unknown"
                         try:
-                            # Look for SNI extension (very simplified)
-                            # Server Name extension
                             if b'\x00\x00' in payload[43:]:
                                 sni_start = payload.find(b'\x00\x00', 43)
                                 if sni_start > 0 and sni_start + 9 < len(payload):
@@ -412,7 +406,7 @@ def detect_tls_anomalies(packets):
                 continue
 
     return {
-        "tls_handshakes": tls_handshakes[:20],  # Limit output
+        "tls_handshakes": tls_handshakes[:20],
         "handshake_count": len(tls_handshakes)
     }
 
@@ -440,7 +434,7 @@ def detect_non_standard_protocols(packets):
             # Check for protocol signatures
             for protocol, signatures in protocol_signatures.items():
                 for signature in signatures:
-                    if signature in payload[:50]:  # Check first 50 bytes
+                    if signature in payload[:50]:
                         # Check if it's on an unusual port for this protocol
                         standard_ports = {
                             'IRC': [6667, 6668, 6669, 194],
@@ -490,32 +484,94 @@ def detect_cleartext_credentials(packets):
     return {"leak_indicators": leaks, "leak_count": len(leaks)}
 
 
-def flag_suspicious_ips(packets, reputation_db=None):
-    suspicious_ips = defaultdict(set)
+
+from scapy.layers.inet import IP
+from rich.console import Console
+from rich.progress import Progress
+from configparser import ConfigParser
+
+console = Console()
+config = ConfigParser()
+config.read("config.ini")
+ABUSEIPDB_API_KEY = config['DEFAULT']['API_KEY']
+CONFIDENCE_SCORE = int(config['DEFAULT']['confidenceScore'])
+MAX_AGE_DAYS = int(config['DEFAULT'].get('maxAgeInDays', '30'))
+
+def flag_suspicious_ips(packets):
+    """
+    AbuseIPDB lookup (individual checks).
+    """
+
+    def check_ip(ip):
+        """
+        Queries AbuseIPDB.
+        """
+        url = 'https://api.abuseipdb.com/api/v2/check'
+        headers = {
+            'Accept': 'application/json',
+            'Key': ABUSEIPDB_API_KEY
+        }
+        params = {
+            'ipAddress': ip,
+            'maxAgeInDays': MAX_AGE_DAYS
+        }
+
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()['data']
+                return {
+                    "ip": data['ipAddress'],
+                    "score": data['abuseConfidenceScore'],
+                    "reports": data['numDistinctUsers'],
+                    "country": data.get('countryCode'),
+                    "domain": data.get('domain'),
+                    "whitelisted": data.get('isWhitelisted'),
+                    "usage_type": data.get('usageType'),
+                    "last_reported": data.get('mostRecentReport'),
+                    "link": f"https://abuseipdb.com/check/ {data['ipAddress']}"
+                }
+            else:
+                console.print(f"[red]Error fetching {ip}: {response.status_code} - {response.text}[/red]")
+                return None
+        except Exception as e:
+            console.print(f"[red]Exception while checking {ip}: {e}[/red]")
+            return None
+
+    unique_ips = set()
+    internal_prefixes = ("192.168.", "10.", "172.")
 
     for pkt in packets:
         if pkt.haslayer(IP):
             src = pkt[IP].src
             dst = pkt[IP].dst
+            for ip in [src, dst]:
+                unique_ips.add(ip)
+                # if not ip.startswith(internal_prefixes):
+                #     unique_ips.add(ip)
 
-            # Simulated scoring
-            if reputation_db:
-                if src in reputation_db:
-                    suspicious_ips[src].add("source")
-                if dst in reputation_db:
-                    suspicious_ips[dst].add("destination")
+    if not unique_ips:
+        return {"flagged_ips": [], "total_checked": 0}
 
-            # Simple heuristic: flag external + private IP mix
-            if (src.startswith("192.168.") and not dst.startswith("192.168.")) or \
-               (dst.startswith("192.168.") and not src.startswith("192.168.")):
-                continue  # common NAT traffic
-            if not src.startswith("192.") and not dst.startswith("192."):
-                suspicious_ips[src].add("external")
-                suspicious_ips[dst].add("external")
+    flagged_ip_data = []
+
+    # Query AbuseIPDB
+    with Progress(transient=True) as progress:
+        task = progress.add_task("[cyan]Querying AbuseIPDB...", total=len(unique_ips))
+        for ip in unique_ips:
+            result = check_ip(ip)
+            if result and result["score"] >= CONFIDENCE_SCORE:
+                flagged_ip_data.append(result)
+            time.sleep(1.5)
+            progress.update(task, advance=1)
 
     return {
-        "flagged_ips": list(suspicious_ips.keys()),
-        "ip_roles": {ip: list(roles) for ip, roles in suspicious_ips.items()}
+        "flagged_ips": flagged_ip_data,
+        "total_checked": len(unique_ips),
+        "total_flagged": len(flagged_ip_data),
+        "confidence_threshold": CONFIDENCE_SCORE,
+        "max_age_days": MAX_AGE_DAYS,
+        "reputation_service": "AbuseIPDB"
     }
 
 def detect_unusual_ports(packets, mode="any", max_examples=3, include_port_stats=True):

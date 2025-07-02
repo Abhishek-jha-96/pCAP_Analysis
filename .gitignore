@@ -208,3 +208,4 @@ __marimo__/
 
 # Local packet data file
 data.pcap
+config.ini
